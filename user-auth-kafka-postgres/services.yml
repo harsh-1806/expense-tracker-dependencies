@@ -1,0 +1,86 @@
+version: '3'
+
+services:
+    zookeeper:
+        image: confluentinc/cp-zookeeper:7.4.4
+        environment:
+            ZOOKEEPER_CLIENT_PORT: 2181
+            ZOOKEEPER_TICK_TIME: 2000
+        ports:
+            - 2181:2181
+        # volumes:
+        #   - zookeeper-data:/var/lib/zookeeper
+
+    kafka:
+        image: confluentinc/cp-kafka:7.4.4
+        depends_on:
+            - zookeeper
+        ports:
+            - 9092:9092
+        environment:
+            KAFKA_BROKER_ID: 1
+            KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+            KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+            KAFKA_LISTENERS: PLAINTEXT://:9092
+            KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+            KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+            KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+        # volumes:
+        #   - kafka-data:/var/lib/kafka/data
+
+    postgres:
+        image: postgres:alpine
+        container_name: postgres
+        restart: always
+        environment:
+            POSTGRES_USER: root
+            POSTGRES_PASSWORD: 'password'
+        ports:
+            - '5432:5432'
+        volumes:
+            - postgres-db:/var/lib/postgresql/data
+
+    userservice:
+        image: user-service
+        container_name: user-service
+        ports:
+            - '9810:9810'
+        environment:
+            POSTGRES_HOST: postgres
+            POSTGRES_PORT: 5432
+            POSTGRES_USER: root
+            POSTGRES_PASSWORD: 'password'
+            POSTGRES_DB: user_db
+            KAFKA_HOST: kafka
+            KAFKA_PORT: 9092
+            USER_SERVICE_PORT: 9810
+        depends_on:
+            - kafka
+            - postgres
+            - authservice
+
+    authservice:
+        image: auth-service
+        container_name: auth-service
+        environment:
+            POSTGRES_HOST: postgres
+            POSTGRES_PORT: 5432
+            POSTGRES_USER: root
+            POSTGRES_PASSWORD: 'password'
+            POSTGRES_DB: auth_db
+            KAFKA_HOST: kafka
+            KAFKA_PORT: 9092
+            AUTH_SERVICE_PORT: 9898
+        ports:
+            - '9898:9898'
+        depends_on:
+            - kafka
+            - postgres
+
+volumes:
+    postgres-db:
+        driver: local
+    # zookeeper-data:
+    #   driver: local
+    # kafka-data:
+    #   driver: local
