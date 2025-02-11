@@ -22,6 +22,13 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
       
+      - name: Verify CloudFormation template exists
+        run: |
+          if [ ! -f cloudformation-template-init-infra.yml ]; then
+            echo "CloudFormation template not found!"
+            exit 1
+          fi
+
       - name: Deploy Infrastructure
         run: |
           aws cloudformation deploy \
@@ -35,18 +42,19 @@ jobs:
             --stack-name infra-stack \
             --query 'Stacks[0].Outputs' \
             > infra-stack-output.json
-            cat infra-stack-output.json
+          cat infra-stack-output.json
       
       - name: Upload infra outputs to S3
         env:
           BUCKET_NAME: 'expense-tracker-infra'
           INFRA_OUTPUTS_FILE: 'infra-stack-output.json'
         run: |
-          if ! aws s3api head-bucket --bucket-name $BUCKET_NAME 2>/dev/null; then
-            aws s3api create-bucket --bucket $BUCKET_NAME --region ${{ env.AWS_REGION }}
+          set -e
+          if ! aws s3api head-bucket --bucket $BUCKET_NAME 2>/dev/null; then
+            echo "Creating bucket: $BUCKET_NAME"
+            aws s3api create-bucket --bucket $BUCKET_NAME --region ${{ env.AWS_REGION }} --create-bucket-configuration LocationConstraint=${{ env.AWS_REGION }}
           else 
             echo "Bucket $BUCKET_NAME already exists"
           fi
-            echo "Uploading infra outputs to S3: $BUCKET_NAME"
-            aws s3 cp $INFRA_OUTPUTS_FILE s3://$BUCKET_NAME/$INFRA_OUTPUTS_FILE
-            
+          echo "Uploading infra outputs to S3: $BUCKET_NAME"
+          aws s3 cp $INFRA_OUTPUTS_FILE s3://$BUCKET_NAME/$INFRA_OUTPUTS_FILE --acl private
