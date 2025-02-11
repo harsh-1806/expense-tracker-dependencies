@@ -2,6 +2,8 @@
 
 This repository contains the infrastructure setup and microservices configuration for deploying a scalable system using AWS CloudFormation, Docker Compose, Kafka, Kong, and PostgreSQL.
 
+![Alt Text](diagram.png)
+
 ## Repository Structure
 ```
 .
