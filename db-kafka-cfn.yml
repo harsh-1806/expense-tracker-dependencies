@@ -1,0 +1,384 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation template for Expense Tracker Services with PostgreSQL, Kafka, and Zookeeper on AWS Fargate
+
+Parameters:
+  VpcId:
+    Type: AWS::SSM::Parameter::Value<String>
+    Description: VPC ID from SSM
+  PrivateSubnet0:
+    Type: AWS::SSM::Parameter::Value<String>
+    Description: Private Subnet 0 from SSM
+  PrivateSubnet1:
+    Type: AWS::SSM::Parameter::Value<String>
+    Description: Private Subnet 1 from SSM
+
+Resources:
+  # EFS File System for persistent storage
+  EFSFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      PerformanceMode: generalPurpose
+      Encrypted: true
+      BackupPolicy:
+        Status: ENABLED
+
+  # Mount targets for EFS
+  MountTarget1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !Ref PrivateSubnet0
+      SecurityGroups: [!Ref EFSSecurityGroup]
+
+  MountTarget2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !Ref PrivateSubnet1
+      SecurityGroups: [!Ref EFSSecurityGroup]
+
+  # Security Groups
+  EFSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      GroupDescription: Security group for EFS
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          CidrIp: !GetAtt VpcId.CidrBlock
+
+  DbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      GroupDescription: Security group for PostgreSQL and Kafka
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: !GetAtt VpcId.CidrBlock
+        - IpProtocol: tcp
+          FromPort: 9092
+          ToPort: 9092
+          CidrIp: !GetAtt VpcId.CidrBlock
+        - IpProtocol: tcp
+          FromPort: 2181
+          ToPort: 2181
+          CidrIp: !GetAtt VpcId.CidrBlock
+
+  # Secrets for database credentials
+  DatabaseSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${AWS::StackName}-db-credentials
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "postgres"}'
+        GenerateStringKey: "password"
+        PasswordLength: 16
+        ExcludeCharacters: '"@/\'
+
+  # Service Discovery resources
+  PrivateDNSNamespace:
+    Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+    Properties:
+      Name: expense-tracker.local
+      Vpc: !Ref VpcId
+
+  # ECS Cluster and core infrastructure
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: DatabaseKafkaCluster
+      ServiceConnectDefaults:
+        Namespace: !GetAtt PrivateDNSNamespace.Id
+
+  DatabaseNLB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets:
+        - !Ref PrivateSubnet0
+        - !Ref PrivateSubnet1
+      Scheme: internal
+      Type: network
+
+  # PostgreSQL Task Definition with improved configuration
+  PostgreSQLTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: PostgreSQLTaskDef
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      Memory: '4096'
+      Cpu: '1024'
+      ExecutionRoleArn: !GetAtt ECSExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      Volumes:
+        - Name: postgresql-data
+          EFSVolumeConfiguration:
+            FilesystemId: !Ref EFSFileSystem
+            TransitEncryption: ENABLED
+            AuthorizationConfig:
+              IAM: ENABLED
+      ContainerDefinitions:
+        - Name: PostgreSQLContainer
+          Image: postgres:15-alpine
+          Essential: true
+          MountPoints:
+            - SourceVolume: postgresql-data
+              ContainerPath: /var/lib/postgresql/data
+          Environment:
+            - Name: POSTGRES_DB
+              Value: expensedb
+            - Name: PGDATA
+              Value: /var/lib/postgresql/data/pgdata
+          Secrets:
+            - Name: POSTGRES_USER
+              ValueFrom: !Sub "${DatabaseSecret}:username"
+            - Name: POSTGRES_PASSWORD
+              ValueFrom: !Sub "${DatabaseSecret}:password"
+          PortMappings:
+            - ContainerPort: 5432
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref PostgreSQLLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: PostgreSQL
+          HealthCheck:
+            Command: 
+              - CMD-SHELL
+              - pg_isready -U postgres
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+
+  # Zookeeper Task Definition with persistence
+  ZookeeperTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: ZookeeperTaskDef
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      Memory: '2048'
+      Cpu: '1024'
+      ExecutionRoleArn: !GetAtt ECSExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      Volumes:
+        - Name: zookeeper-data
+          EFSVolumeConfiguration:
+            FilesystemId: !Ref EFSFileSystem
+            TransitEncryption: ENABLED
+      ContainerDefinitions:
+        - Name: ZookeeperContainer
+          Image: confluentinc/cp-zookeeper:7.4.4
+          Essential: true
+          MountPoints:
+            - SourceVolume: zookeeper-data
+              ContainerPath: /var/lib/zookeeper
+          Environment:
+            - Name: ZOOKEEPER_CLIENT_PORT
+              Value: '2181'
+            - Name: ZOOKEEPER_TICK_TIME
+              Value: '2000'
+            - Name: ZOOKEEPER_DATA_DIR
+              Value: /var/lib/zookeeper
+          PortMappings:
+            - ContainerPort: 2181
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ZookeeperLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: Zookeeper
+
+  # Kafka Task Definition with proper networking
+  KafkaTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: KafkaTaskDef
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      Memory: '4096'
+      Cpu: '2048'
+      ExecutionRoleArn: !GetAtt ECSExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      Volumes:
+        - Name: kafka-data
+          EFSVolumeConfiguration:
+            FilesystemId: !Ref EFSFileSystem
+            TransitEncryption: ENABLED
+      ContainerDefinitions:
+        - Name: KafkaContainer
+          Image: confluentinc/cp-kafka:7.4.4
+          Essential: true
+          MountPoints:
+            - SourceVolume: kafka-data
+              ContainerPath: /var/lib/kafka
+          Environment:
+            - Name: KAFKA_BROKER_ID
+              Value: '1'
+            - Name: KAFKA_ZOOKEEPER_CONNECT
+              Value: zookeeper.expense-tracker.local:2181
+            - Name: KAFKA_ADVERTISED_LISTENERS
+              Value: !Sub PLAINTEXT://${DatabaseNLB.DNSName}:9092
+            - Name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+              Value: PLAINTEXT:PLAINTEXT
+            - Name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+              Value: 'false'
+            - Name: KAFKA_LOG_DIRS
+              Value: /var/lib/kafka
+          PortMappings:
+            - ContainerPort: 9092
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref KafkaLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: Kafka
+
+  # Log Groups
+  PostgreSQLLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/PostgreSQL
+      RetentionInDays: 30
+
+  ZookeeperLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/Zookeeper
+      RetentionInDays: 30
+
+  KafkaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/Kafka
+      RetentionInDays: 30
+
+  # IAM Roles
+  ECSExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: SecretsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref DatabaseSecret
+
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: EFSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - elasticfilesystem:ClientMount
+                  - elasticfilesystem:ClientWrite
+                Resource: !GetAtt EFSFileSystem.Arn
+
+  # Target Groups and Listeners with correct ports
+  PostgreSQLTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      Protocol: TCP
+      Port: 5432
+      TargetType: ip
+      HealthCheckProtocol: TCP
+      HealthCheckPort: traffic-port
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 3
+      UnhealthyThresholdCount: 3
+
+  KafkaTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      Protocol: TCP
+      Port: 9092
+      TargetType: ip
+      HealthCheckProtocol: TCP
+      HealthCheckPort: traffic-port
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 3
+      UnhealthyThresholdCount: 3
+
+  PostgreSQLListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref DatabaseNLB
+      Port: 5432
+      Protocol: TCP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref PostgreSQLTargetGroup
+
+  KafkaListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref DatabaseNLB
+      Port: 9092
+      Protocol: TCP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref KafkaTargetGroup
+
+  # Service Discovery entries
+  ZookeeperServiceDiscoveryEntry:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: zookeeper
+      DnsConfig:
+        NamespaceId: !GetAtt PrivateDNSNamespace.Id
+        DnsRecords:
+          - Type: A
+            TTL: 60
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+
+  # Parameter Store entry for NLB DNS
+  ExpenseTrackerServicesNLB:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: ExpenseTrackerServicesNLB
+      Type: String
+      Value: !GetAtt DatabaseNLB.DNSName
+
+Outputs:
+  LoadBalancerDNS:
+    Description: DNS Name of the NLB
+    Value: !GetAtt DatabaseNLB.DNSName
+  DatabaseSecretARN:
+    Description: ARN of the database credentials secret
+    Value: !Ref DatabaseSecret
+  EFSFileSystemId:
+    Description: ID of the EFS File System
+    Value: !Ref EFSFileSystem
+  ServiceDiscoveryNamespace:
+    Description: Service Discovery Namespace
+    Value: expense-tracker.local

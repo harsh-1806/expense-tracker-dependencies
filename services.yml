@@ -1,8 +1,7 @@
-version: '3'
-
 services:
   zookeeper:
     image: confluentinc/cp-zookeeper:7.4.4
+    container_name: zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
@@ -13,6 +12,7 @@ services:
   
   kafka:
     image: confluentinc/cp-kafka:7.4.4
+    container_name: kafka
     depends_on:
       - zookeeper
     ports:
@@ -37,12 +37,12 @@ services:
       POSTGRES_PASSWORD: 'password'
     ports:
       - '5432:5432'
-    volumes:
-      - postgres-db:/var/lib/postgresql/data
+    # volumes:
+    #   - postgres-db:/var/lib/postgresql/data
   
   userservice:
     image: user-service
-    container_name: user-service
+    container_name: userservice
     ports:
       - '9810:9810'
     environment:
@@ -62,7 +62,7 @@ services:
 
   expenseservice:
     image: expense-service
-    container_name: expense-service
+    container_name: expenseservice
     ports: 
       - '9820:9820'
     environment:
@@ -80,13 +80,13 @@ services:
 
   dsservice:
     image: ds-service
-    container_name: ds-service
+    container_name: dsservice
     ports:
       - '8010:8010'
     environment:
       KAFKA_HOST: kafka
       KAFKA_PORT: 9092
-      OPENAI_API_KEY: EEcG15Lb6jqcblShxssyi6vkfujhBcf6
+      OPENAI_API_KEY: C35Z1GihH7RqgFZATGhjjHEBDKtjqsY2
     depends_on:
       - kafka
       - postgres
@@ -95,7 +95,7 @@ services:
 
   authservice:
     image: auth-service
-    container_name: auth-service
+    container_name: authservice
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
@@ -113,6 +113,7 @@ services:
   
   kong-service:
     image: kong:latest
+    container_name: kong
     volumes:
       - "./kong/config:/usr/local/kong/declarative"
       - "./kong/custom-plugins:/usr/local/share/lua/5.1/kong/plugins"
@@ -134,9 +135,9 @@ services:
       - "127.0.0.1:8444:8444/tcp"
     depends_on:
       - authservice
-volumes:
-  postgres-db:
-    driver: local
+# volumes:
+  # postgres-db:
+  #   driver: local
   # zookeeper-data:
   #   driver: local
   # kafka-data:

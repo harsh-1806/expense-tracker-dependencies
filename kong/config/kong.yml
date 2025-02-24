@@ -36,3 +36,16 @@ services:
           - /api/v1/auth
         strip_path: false
         preserve_host: false
+
+  - name: ds-service
+    url: http://dsservice:8010
+    routes:
+      - name: ds-route
+        paths:
+          - /api/v1/ds
+        strip_path: false
+        preserve_host: false
+    plugins:
+      - name: custom-auth
+        config:
+          auth_service_url: "http://authservice:9898/api/v1/auth/ping"
